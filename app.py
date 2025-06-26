@@ -109,7 +109,7 @@ def create_oauth_session(client_id, redirect_uri, scope=None, state=None):
         # Override the session's request method to force HTTPS
         original_request = oauth_session.request
         
-        def force_https_request(method, uri, *args, **kwargs):
+        def force_https_request(self, method, uri, *args, **kwargs):
             # Ensure all OAuth requests use HTTPS
             if uri.startswith('http://'):
                 uri = uri.replace('http://', 'https://', 1)
