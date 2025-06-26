@@ -69,6 +69,8 @@ def make_session_permanent():
 def get_redirect_uri(endpoint_name):
     """Generate consistent redirect URI for OAuth callbacks"""
     # Always use hardcoded HTTPS URLs for production
+    if endpoint_name == 'auth_google_callback':
+        return 'https://platform-connection-api-g0b5c3fve2dfb2ag.canadacentral-01.azurewebsites.net/auth/google/callback'
     if is_production():
         endpoint_mapping = {
             'auth_google_callback': f"{BASE_URL}/auth/google/callback",
@@ -77,6 +79,7 @@ def get_redirect_uri(endpoint_name):
             'auth_notion_callback': f"{BASE_URL}/auth/notion/callback"
         }
         return endpoint_mapping.get(endpoint_name)
+        
     else:
         # Use Flask's url_for for local development
         return url_for(endpoint_name, _external=True)
