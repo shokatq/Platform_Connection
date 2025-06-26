@@ -1191,6 +1191,15 @@ def disconnect_platform(platform):
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+        
+@app.route('/debug/redirect')
+def debug_redirect():
+    return jsonify({
+        'generated_redirect_uri': get_redirect_uri('auth_google_callback'),
+        'expected_redirect_uri': 'https://platform-connection-api-g0b5c3fve2dfb2ag.canadacentral-01.azurewebsites.net/auth/google/callback',
+        'base_url': BASE_URL,
+        'is_production': is_production()
+    })
 
 # Utility Routes
 @app.route('/sync/all', methods=['POST'])
