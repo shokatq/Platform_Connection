@@ -29,8 +29,8 @@ COSMOS_CONTAINER = os.getenv('COSMOS_CONTAINER', 'files')
 # OAuth Configuration
 GOOGLE_CLIENT_ID =os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET =os.getenv('GOOGLE_CLIENT_SECRET')
-MICROSOFT_CLIENT_ID = ""
-MICROSOFT_CLIENT_SECRET = ""
+MICROSOFT_CLIENT_ID = os.getenv('MICROSOFT_CLIENT_ID')
+MICROSOFT_CLIENT_SECRET = os.getenv('MICROSOFT_CLIENT_SECRET')
 DROPBOX_CLIENT_ID = os.getenv('DROPBOX_CLIENT_ID')
 DROPBOX_CLIENT_SECRET = os.getenv('DROPBOX_CLIENT_SECRET')
 SLACK_CLIENT_ID = os.getenv('SLACK_CLIENT_ID')
@@ -38,15 +38,38 @@ SLACK_CLIENT_SECRET = os.getenv('SLACK_CLIENT_SECRET')
 NOTION_CLIENT_ID = os.environ.get('NOTION_CLIENT_ID')
 NOTION_CLIENT_SECRET = os.environ.get('NOTION_CLIENT_SECRET')
 
+# FIXED: Add base URL configuration for production
+BASE_URL = os.environ.get('BASE_URL', 'https://platform-connection-api-g0b5c3fve2dfb2ag.canadacentral-01.azurewebsites.net')
+
 app.config['SESSION_PERMANENT'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.config['SESSION_COOKIE_SECURE'] = True if os.environ.get('FLASK_ENV') == 'production' else False
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
+# FIXED: Force HTTPS in production
+if os.environ.get('FLASK_ENV') == 'production':
+    app.config['PREFERRED_URL_SCHEME'] = 'https'
+
 def make_session_permanent():
     """Make current session permanent"""
     session.permanent = True
+
+# FIXED: Helper function to generate consistent redirect URIs
+def get_redirect_uri(endpoint_name):
+    """Generate consistent redirect URI for OAuth callbacks"""
+    if os.environ.get('FLASK_ENV') == 'production':
+        # Use hardcoded base URL for production to avoid Flask's URL generation issues
+        endpoint_mapping = {
+            'auth_google_callback': f"{BASE_URL}/auth/google/callback",
+            'auth_microsoft_callback': f"{BASE_URL}/auth/microsoft/callback", 
+            'auth_dropbox_callback': f"{BASE_URL}/auth/dropbox/callback",
+            'auth_notion_callback': f"{BASE_URL}/auth/notion/callback"
+        }
+        return endpoint_mapping.get(endpoint_name)
+    else:
+        # Use Flask's url_for for local development
+        return url_for(endpoint_name, _external=True)
 
 # Add this after your environment variable declarations
 def debug_oauth_config():
@@ -59,6 +82,7 @@ def debug_oauth_config():
         'DROPBOX_CLIENT_SECRET': bool(DROPBOX_CLIENT_SECRET),
         'NOTION_CLIENT_ID': bool(NOTION_CLIENT_ID),
         'NOTION_CLIENT_SECRET': bool(NOTION_CLIENT_SECRET),
+        'BASE_URL': BASE_URL
     }
     print("OAuth Configuration Status:", config_status)
     return config_status
@@ -111,8 +135,8 @@ class PlatformIntegration:
             "document_title": os.path.splitext(filename)[0],
             "fileName": filename,
             "filePath": blob_path,
-            "platform": platform,  # CORRECTED: This correctly marks the platform
-            "source": "platform_sync",  # CORRECTED: Added source field to distinguish from local uploads
+            "platform": platform,
+            "source": "platform_sync",
             "uploaded_at": original_date.isoformat() if isinstance(original_date, datetime) else original_date,
             "file_size": file_size,
             "mime_type": mime_type,
@@ -138,7 +162,10 @@ class GoogleDriveIntegration(PlatformIntegration):
      if not GOOGLE_CLIENT_ID:
         raise ValueError("GOOGLE_CLIENT_ID not configured")
         
-     redirect_uri = url_for('auth_google_callback', _external=True)
+     # FIXED: Use consistent redirect URI generation
+     redirect_uri = get_redirect_uri('auth_google_callback')
+     print(f"Google redirect URI: {redirect_uri}")  # Debug log
+     
      google = OAuth2Session(
         GOOGLE_CLIENT_ID,
         scope=self.scope,
@@ -157,10 +184,11 @@ class GoogleDriveIntegration(PlatformIntegration):
      if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
         raise ValueError("Google OAuth credentials not configured")
         
-     redirect_uri = url_for('auth_google_callback', _external=True)
+     # FIXED: Use consistent redirect URI generation
+     redirect_uri = get_redirect_uri('auth_google_callback')
      google = OAuth2Session(
         GOOGLE_CLIENT_ID,
-        state=session['google_oauth_state'],  # CORRECTED: Use google_oauth_state
+        state=session['google_oauth_state'],
         redirect_uri=redirect_uri
      )
      token = google.fetch_token(
@@ -240,7 +268,10 @@ class OneDriveIntegration(PlatformIntegration):
      if not MICROSOFT_CLIENT_ID:
         raise ValueError("MICROSOFT_CLIENT_ID not configured")
         
-     redirect_uri = url_for('auth_microsoft_callback', _external=True)
+     # FIXED: Use consistent redirect URI generation
+     redirect_uri = get_redirect_uri('auth_microsoft_callback')
+     print(f"Microsoft redirect URI: {redirect_uri}")  # Debug log
+     
      microsoft = OAuth2Session(
         MICROSOFT_CLIENT_ID,
         scope=self.scope,
@@ -255,10 +286,11 @@ class OneDriveIntegration(PlatformIntegration):
      if not MICROSOFT_CLIENT_ID or not MICROSOFT_CLIENT_SECRET:
         raise ValueError("Microsoft OAuth credentials not configured")
         
-     redirect_uri = url_for('auth_microsoft_callback', _external=True)
+     # FIXED: Use consistent redirect URI generation
+     redirect_uri = get_redirect_uri('auth_microsoft_callback')
      microsoft = OAuth2Session(
         MICROSOFT_CLIENT_ID,
-        state=session['microsoft_oauth_state'],  # CORRECTED: Use microsoft_oauth_state
+        state=session['microsoft_oauth_state'],
         redirect_uri=redirect_uri
      )
      token = microsoft.fetch_token(
@@ -328,15 +360,18 @@ class OneDriveIntegration(PlatformIntegration):
 class DropboxIntegration(PlatformIntegration):
     def __init__(self):
         super().__init__()
-        self.authorization_base_url = 'https://www.dropbox.com/oauth2/authorize'  # ADD THIS LINE
-        self.token_url = 'https://api.dropbox.com/oauth2/token'  # ADD THIS LINE
+        self.authorization_base_url = 'https://www.dropbox.com/oauth2/authorize'
+        self.token_url = 'https://api.dropbox.com/oauth2/token'
     
     def get_auth_url(self, user_email=None):
         """Get Dropbox OAuth authorization URL"""
         if not DROPBOX_CLIENT_ID:
             raise ValueError("DROPBOX_CLIENT_ID not configured")
             
-        redirect_uri = url_for('auth_dropbox_callback', _external=True)
+        # FIXED: Use consistent redirect URI generation
+        redirect_uri = get_redirect_uri('auth_dropbox_callback')
+        print(f"Dropbox redirect URI: {redirect_uri}")  # Debug log
+        
         state = str(uuid.uuid4())
         
         # Store user_email in session with state
@@ -358,12 +393,13 @@ class DropboxIntegration(PlatformIntegration):
         if not DROPBOX_CLIENT_ID or not DROPBOX_CLIENT_SECRET:
             raise ValueError("Dropbox OAuth credentials not configured")
             
-        # CORRECTED: Verify state and get user_email
+        # Verify state and get user_email
         state_data = session.get(f'dropbox_oauth_state_{state}')
         if not state_data or state_data['state'] != state:
             raise ValueError("State mismatch - possible CSRF attack")
             
-        redirect_uri = url_for('auth_dropbox_callback', _external=True)
+        # FIXED: Use consistent redirect URI generation
+        redirect_uri = get_redirect_uri('auth_dropbox_callback')
         data = {
             'code': authorization_code,
             'grant_type': 'authorization_code',
@@ -445,7 +481,7 @@ class DropboxIntegration(PlatformIntegration):
 class NotionIntegration(PlatformIntegration):
     def __init__(self):
         super().__init__()
-        self.authorization_base_url = 'https://api.notion.com/v1/oauth/authorize'  # Use the API URL
+        self.authorization_base_url = 'https://api.notion.com/v1/oauth/authorize'
         self.token_url = 'https://api.notion.com/v1/oauth/token'
     
     def get_auth_url(self, user_email=None):
@@ -453,9 +489,11 @@ class NotionIntegration(PlatformIntegration):
         if not NOTION_CLIENT_ID:
             raise ValueError("NOTION_CLIENT_ID not configured")
             
-        redirect_uri = url_for('auth_notion_callback', _external=True)
+        # FIXED: Use consistent redirect URI generation
+        redirect_uri = get_redirect_uri('auth_notion_callback')
+        print(f"Notion redirect URI: {redirect_uri}")  # Debug log
         
-        # SOLUTION 2: Include user_email in state parameter
+        # Include user_email in state parameter
         state_data = {
             'uuid': str(uuid.uuid4()),
             'user_email': user_email
@@ -489,7 +527,8 @@ class NotionIntegration(PlatformIntegration):
         if state and state.strip() and state != session.get('notion_oauth_state'):
             raise ValueError("State mismatch - possible CSRF attack")
             
-        redirect_uri = url_for('auth_notion_callback', _external=True)
+        # FIXED: Use consistent redirect URI generation
+        redirect_uri = get_redirect_uri('auth_notion_callback')
         auth_string = base64.b64encode(f"{NOTION_CLIENT_ID}:{NOTION_CLIENT_SECRET}".encode()).decode()
         
         headers = {
@@ -565,10 +604,6 @@ class NotionIntegration(PlatformIntegration):
                 
                 if title_prop and title_prop.get('title'):
                     page_title = ''.join([t['plain_text'] for t in title_prop['title']])
-            
-            # Export page as PDF (Notion doesn't provide direct file download)
-            # We'll create a text representation and save it as .txt for now
-            # In production, you might want to use a service to convert to PDF
             
             # Get page content
             blocks_url = f'https://api.notion.com/v1/blocks/{page_id}/children'
@@ -715,13 +750,12 @@ def store_user_token(user_email, platform, token_data):
         print(f"Token preview: {token_data.get('access_token', 'N/A')[:10]}...")  # Debug log
         
     except Exception as e:
-        print(f"Error storing user token for {user_email}: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error storing user token: {e}")
+        raise
 
 
-def load_user_token(user_email, platform):
-    """Load user's platform token from their blob storage"""
+def get_user_token(user_email, platform):
+    """Retrieve user's platform token from their blob storage userInfo.json"""
     try:
         blob_name = f"{user_email}/userInfo.json"
         blob_client = blob_service_client.get_blob_client(
@@ -729,78 +763,82 @@ def load_user_token(user_email, platform):
             blob=blob_name
         )
         
-        data = blob_client.download_blob().readall()
-        user_info = json.loads(data.decode('utf-8'))
+        existing_data = blob_client.download_blob().readall()
+        user_info = json.loads(existing_data.decode('utf-8'))
         
-        return user_info.get("platform_tokens", {}).get(platform)
+        platform_tokens = user_info.get("platform_tokens", {})
+        return platform_tokens.get(platform)
         
     except Exception as e:
-        print(f"Error loading user token: {e}")
+        print(f"Error retrieving user token: {e}")
         return None
+
 
 # Routes
 @app.route('/')
 def index():
     return jsonify({
-        'message': 'Multi-Platform File Integration API',
-        'available_platforms': ['google_drive', 'onedrive', 'dropbox', 'notion', 'slack'],
-        'endpoints': {
-            'auth': '/auth/{platform}',
-            'sync': '/sync/{platform}',
-            'status': '/status'
-        }
+        'message': 'Platform Connection API',
+        'version': '1.0',
+        'available_platforms': ['google_drive', 'onedrive', 'dropbox', 'notion']
     })
+
+@app.route('/debug/config')
+def debug_config():
+    """Debug endpoint to check OAuth configuration"""
+    return jsonify(debug_oauth_config())
 
 # Google Drive Routes
 @app.route('/auth/google')
 def auth_google():
-    """Initiate Google Drive OAuth"""
-    auth_url = google_drive.get_auth_url()
-    return redirect(auth_url)
+    """Start Google Drive OAuth flow"""
+    make_session_permanent()
+    
+    user_email = request.args.get('user_email')
+    if not user_email:
+        return jsonify({'error': 'user_email parameter is required'}), 400
+    
+    try:
+        session['user_email'] = user_email
+        auth_url = google_drive.get_auth_url()
+        return redirect(auth_url)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/auth/google/callback')
 def auth_google_callback():
     """Handle Google Drive OAuth callback"""
     try:
-        if 'error' in request.args:
-            return jsonify({'error': f"OAuth error: {request.args.get('error')}"}), 400
+        user_email = session.get('user_email')
+        if not user_email:
+            return jsonify({'error': 'Session expired. Please start the authentication process again.'}), 400
         
-        # CORRECTED: Use google_oauth_state instead of oauth_state
-        if request.args.get('state') != session.get('google_oauth_state'):
-            return jsonify({'error': 'State mismatch - possible CSRF attack'}), 400
-            
         token = google_drive.get_access_token(request.url)
-        make_session_permanent()
-        session['google_token'] = token
         
-        # CORRECTED: Store token in user's blob storage
-        user_email = session.get('user_email')  # Assuming you set this during login
-        if user_email:
-            store_user_token(user_email, 'google_drive', token)
+        # Store token
+        store_user_token(user_email, 'google_drive', token)
         
-        return jsonify({'message': 'Google Drive authentication successful', 'token_type': token.get('token_type')})
+        return jsonify({
+            'message': 'Google Drive connected successfully!',
+            'user_email': user_email,
+            'platform': 'google_drive'
+        })
     except Exception as e:
-        print(f"Google OAuth callback error: {str(e)}")
-        return jsonify({'error': f"Authentication failed: {str(e)}"}), 400
+        return jsonify({'error': str(e)}), 500
 
-
-# Apply similar pattern to other callback routes
-
-@app.route('/sync/google_drive')
-def sync_google_drive():
+@app.route('/sync/google')
+def sync_google():
     """Sync files from Google Drive"""
     user_email = request.args.get('user_email')
     if not user_email:
-        return jsonify({'error': 'user_email parameter required'}), 400
+        return jsonify({'error': 'user_email parameter is required'}), 400
     
     try:
-        # CORRECTED: Load token from blob storage instead of session
-        token_data = load_user_token(user_email, 'google_drive')
+        token_data = get_user_token(user_email, 'google_drive')
         if not token_data:
-            return jsonify({'error': 'Not authenticated with Google Drive'}), 401
-            
-        access_token = token_data['access_token']
-        result = google_drive.sync_files(access_token, user_email)
+            return jsonify({'error': 'Google Drive not connected. Please authenticate first.'}), 401
+        
+        result = google_drive.sync_files(token_data['access_token'], user_email)
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -808,13 +846,214 @@ def sync_google_drive():
 # Microsoft OneDrive Routes
 @app.route('/auth/microsoft')
 def auth_microsoft():
-    """Initiate Microsoft OneDrive OAuth"""
-    auth_url = onedrive.get_auth_url()
-    return redirect(auth_url)
+    """Start Microsoft OneDrive OAuth flow"""
+    make_session_permanent()
+    
+    user_email = request.args.get('user_email')
+    if not user_email:
+        return jsonify({'error': 'user_email parameter is required'}), 400
+    
+    try:
+        session['user_email'] = user_email
+        auth_url = onedrive.get_auth_url()
+        return redirect(auth_url)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
-@app.route('/test/tokens/<user_email>')
-def test_user_tokens(user_email):
-    """Test endpoint to check stored tokens for a user"""
+@app.route('/auth/microsoft/callback')
+def auth_microsoft_callback():
+    """Handle Microsoft OneDrive OAuth callback"""
+    try:
+        user_email = session.get('user_email')
+        if not user_email:
+            return jsonify({'error': 'Session expired. Please start the authentication process again.'}), 400
+        
+        token = onedrive.get_access_token(request.url)
+        
+        # Store token
+        store_user_token(user_email, 'onedrive', token)
+        
+        return jsonify({
+            'message': 'Microsoft OneDrive connected successfully!',
+            'user_email': user_email,
+            'platform': 'onedrive'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/sync/microsoft')
+def sync_microsoft():
+    """Sync files from Microsoft OneDrive"""
+    user_email = request.args.get('user_email')
+    if not user_email:
+        return jsonify({'error': 'user_email parameter is required'}), 400
+    
+    try:
+        token_data = get_user_token(user_email, 'onedrive')
+        if not token_data:
+            return jsonify({'error': 'Microsoft OneDrive not connected. Please authenticate first.'}), 401
+        
+        result = onedrive.sync_files(token_data['access_token'], user_email)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Dropbox Routes
+@app.route('/auth/dropbox')
+def auth_dropbox():
+    """Start Dropbox OAuth flow"""
+    make_session_permanent()
+    
+    user_email = request.args.get('user_email')
+    if not user_email:
+        return jsonify({'error': 'user_email parameter is required'}), 400
+    
+    try:
+        auth_url = dropbox_integration.get_auth_url(user_email)
+        return redirect(auth_url)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/auth/dropbox/callback')
+def auth_dropbox_callback():
+    """Handle Dropbox OAuth callback"""
+    try:
+        authorization_code = request.args.get('code')
+        state = request.args.get('state')
+        
+        if not authorization_code:
+            return jsonify({'error': 'Authorization code not received'}), 400
+        
+        token_data, user_email = dropbox_integration.get_access_token(authorization_code, state)
+        
+        # Store token
+        store_user_token(user_email, 'dropbox', token_data)
+        
+        return jsonify({
+            'message': 'Dropbox connected successfully!',
+            'user_email': user_email,
+            'platform': 'dropbox'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/sync/dropbox')
+def sync_dropbox():
+    """Sync files from Dropbox"""
+    user_email = request.args.get('user_email')
+    if not user_email:
+        return jsonify({'error': 'user_email parameter is required'}), 400
+    
+    try:
+        token_data = get_user_token(user_email, 'dropbox')
+        if not token_data:
+            return jsonify({'error': 'Dropbox not connected. Please authenticate first.'}), 401
+        
+        result = dropbox_integration.sync_files(token_data['access_token'], user_email)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Notion Routes
+@app.route('/auth/notion')
+def auth_notion():
+    """Start Notion OAuth flow"""
+    make_session_permanent()
+    
+    user_email = request.args.get('user_email')
+    if not user_email:
+        return jsonify({'error': 'user_email parameter is required'}), 400
+    
+    try:
+        auth_url = notion_integration.get_auth_url(user_email)
+        return redirect(auth_url)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/auth/notion/callback')
+def auth_notion_callback():
+    """Handle Notion OAuth callback"""
+    try:
+        authorization_code = request.args.get('code')
+        state = request.args.get('state')
+        
+        if not authorization_code:
+            return jsonify({'error': 'Authorization code not received'}), 400
+        
+        token_data = notion_integration.get_access_token(authorization_code, state)
+        user_email = token_data.get('user_email')
+        
+        if not user_email:
+            return jsonify({'error': 'User email not found in token data'}), 400
+        
+        # Store token
+        store_user_token(user_email, 'notion', token_data)
+        
+        return jsonify({
+            'message': 'Notion connected successfully!',
+            'user_email': user_email,
+            'platform': 'notion'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/sync/notion')
+def sync_notion():
+    """Sync files from Notion"""
+    user_email = request.args.get('user_email')
+    if not user_email:
+        return jsonify({'error': 'user_email parameter is required'}), 400
+    
+    try:
+        token_data = get_user_token(user_email, 'notion')
+        if not token_data:
+            return jsonify({'error': 'Notion not connected. Please authenticate first.'}), 401
+        
+        result = notion_integration.sync_files(token_data['access_token'], user_email)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# General sync route for all platforms
+@app.route('/sync/all')
+def sync_all_platforms():
+    """Sync files from all connected platforms"""
+    user_email = request.args.get('user_email')
+    if not user_email:
+        return jsonify({'error': 'user_email parameter is required'}), 400
+    
+    results = {}
+    platforms = ['google_drive', 'onedrive', 'dropbox', 'notion']
+    
+    for platform in platforms:
+        try:
+            token_data = get_user_token(user_email, platform)
+            if token_data:
+                if platform == 'google_drive':
+                    result = google_drive.sync_files(token_data['access_token'], user_email)
+                elif platform == 'onedrive':
+                    result = onedrive.sync_files(token_data['access_token'], user_email)
+                elif platform == 'dropbox':
+                    result = dropbox_integration.sync_files(token_data['access_token'], user_email)
+                elif platform == 'notion':
+                    result = notion_integration.sync_files(token_data['access_token'], user_email)
+                
+                results[platform] = result
+            else:
+                results[platform] = {'error': 'Not connected'}
+        except Exception as e:
+            results[platform] = {'error': str(e)}
+    
+    return jsonify(results)
+
+# User status route
+@app.route('/user/status')
+def user_status():
+    """Get user's connected platforms status"""
+    user_email = request.args.get('user_email')
+    if not user_email:
+        return jsonify({'error': 'user_email parameter is required'}), 400
+    
     try:
         blob_name = f"{user_email}/userInfo.json"
         blob_client = blob_service_client.get_blob_client(
@@ -822,311 +1061,48 @@ def test_user_tokens(user_email):
             blob=blob_name
         )
         
-        data = blob_client.download_blob().readall()
-        user_info = json.loads(data.decode('utf-8'))
+        existing_data = blob_client.download_blob().readall()
+        user_info = json.loads(existing_data.decode('utf-8'))
         
-        # Don't expose full tokens, just status
-        token_status = {}
-        for platform, token_data in user_info.get("platform_tokens", {}).items():
-            token_status[platform] = {
-                'has_access_token': bool(token_data.get('access_token')),
-                'updated_at': token_data.get('updated_at'),
-                'token_type': token_data.get('token_type')
+        platform_tokens = user_info.get("platform_tokens", {})
+        
+        status = {}
+        for platform in ['google_drive', 'onedrive', 'dropbox', 'notion']:
+            if platform in platform_tokens:
+                token_info = platform_tokens[platform]
+                status[platform] = {
+                    'connected': True,
+                    'updated_at': token_info.get('updated_at'),
+                    'expires_at': token_info.get('expires_at')
+                }
+            else:
+                status[platform] = {'connected': False}
+        
+        return jsonify({
+            'user_email': user_email,
+            'platforms': status
+        })
+        
+    except Exception as e:
+        # If file doesn't exist, user hasn't connected any platforms
+        return jsonify({
+            'user_email': user_email,
+            'platforms': {
+                'google_drive': {'connected': False},
+                'onedrive': {'connected': False},
+                'dropbox': {'connected': False},
+                'notion': {'connected': False}
             }
-        
-        return jsonify({
-            'user_email': user_email,
-            'token_status': token_status
         })
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
 
+# Error handlers
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({'error': 'Endpoint not found'}), 404
 
-@app.route('/auth/microsoft/callback')
-def auth_microsoft_callback():
-    """Handle Microsoft OneDrive OAuth callback"""
-    try:
-        if 'error' in request.args:
-            return jsonify({'error': f"OAuth error: {request.args.get('error')}"}), 400
-        
-        # CORRECTED: Use microsoft_oauth_state instead of oauth_state    
-        if request.args.get('state') != session.get('microsoft_oauth_state'):
-            return jsonify({'error': 'State mismatch - possible CSRF attack'}), 400
-            
-        token = onedrive.get_access_token(request.url)
-        make_session_permanent()
-        session['microsoft_token'] = token
-        
-        # CORRECTED: Store token in user's blob storage
-        user_email = session.get('user_email')
-        if user_email:
-            store_user_token(user_email, 'onedrive', token)
-            
-        return jsonify({'message': 'Microsoft OneDrive authentication successful', 'token_type': token.get('token_type')})
-    except Exception as e:
-        print(f"Microsoft OAuth callback error: {str(e)}")
-        return jsonify({'error': f"Authentication failed: {str(e)}"}), 400
-
-
-@app.route('/sync/onedrive')
-def sync_onedrive():
-    """Sync files from OneDrive"""
-    if 'microsoft_token' not in session:
-        return jsonify({'error': 'Not authenticated with Microsoft OneDrive'}), 401
-    
-    user_email = request.args.get('user_email')
-    if not user_email:
-        return jsonify({'error': 'user_email parameter required'}), 400
-    
-    try:
-        access_token = session['microsoft_token']['access_token']
-        result = onedrive.sync_files(access_token, user_email)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# Dropbox Routes
-
-@app.route('/auth/dropbox')
-def auth_dropbox():
-    """Initiate Dropbox OAuth"""
-    user_email = request.args.get('user_email')
-    if not user_email:
-        return jsonify({'error': 'user_email parameter required'}), 400
-        
-    auth_url = dropbox_integration.get_auth_url(user_email)
-    return redirect(auth_url)
-
-# CORRECTED: Updated callback to properly handle user_email
-@app.route('/auth/dropbox/callback')
-def auth_dropbox_callback():
-    """Handle Dropbox OAuth callback"""
-    try:
-        if 'error' in request.args:
-            return jsonify({'error': f"OAuth error: {request.args.get('error')}"}), 400
-            
-        auth_code = request.args.get('code')
-        state = request.args.get('state')
-        
-        if not auth_code or not state:
-            return jsonify({'error': 'Missing authorization code or state'}), 400
-            
-        # CORRECTED: Get token and user_email together
-        token, user_email = dropbox_integration.get_access_token(auth_code, state)
-        make_session_permanent()
-        session['dropbox_token'] = token
-        
-        # CORRECTED: Now we have user_email to store the token
-        if user_email:
-            store_user_token(user_email, 'dropbox', token)
-            print(f"Token stored for user: {user_email}")  # Debug log
-        else:
-            print("Warning: No user_email found, token not stored")  # Debug log
-            
-        return jsonify({
-            'message': 'Dropbox authentication successful', 
-            'token_type': token.get('token_type'),
-            'user_email': user_email
-        })
-    except Exception as e:
-        print(f"Dropbox OAuth callback error: {str(e)}")
-        return jsonify({'error': f"Authentication failed: {str(e)}"}), 400
-
-
-@app.route('/sync/dropbox')
-def sync_dropbox():
-    """Sync files from Dropbox"""
-    user_email = request.args.get('user_email')
-    if not user_email:
-        return jsonify({'error': 'user_email parameter required'}), 400
-    
-    try:
-        # CORRECTED: Load token from blob storage instead of session
-        token_data = load_user_token(user_email, 'dropbox')
-        if not token_data:
-            return jsonify({'error': 'Not authenticated with Dropbox'}), 401
-            
-        access_token = token_data['access_token']
-        result = dropbox_integration.sync_files(access_token, user_email)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# Notion Routes
-@app.route('/sync/notion')
-def sync_notion():
-    """Sync files from Notion"""
-    user_email = request.args.get('user_email')
-    if not user_email:
-        return jsonify({'error': 'user_email parameter required'}), 400
-    
-    try:
-        # Load token from blob storage
-        token_data = load_user_token(user_email, 'notion')
-        if not token_data:
-            return jsonify({
-                'error': 'Not authenticated with Notion',
-                'suggestion': f'Please authenticate first at /auth/notion/{user_email}'
-            }), 401
-            
-        access_token = token_data['access_token']
-        print(f"Using access token for sync: {access_token[:10]}...")  # Debug log
-        
-        result = notion_integration.sync_files(access_token, user_email)
-        return jsonify(result)
-    except Exception as e:
-        print(f"Notion sync error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/auth/notion/callback')
-def auth_notion_callback():
-    """Handle Notion OAuth callback - Updated version"""
-    try:
-        if 'error' in request.args:
-            error_description = request.args.get('error_description', 'Unknown error')
-            return jsonify({
-                'error': f"OAuth error: {request.args.get('error')}",
-                'description': error_description
-            }), 400
-
-        auth_code = request.args.get('code')
-        state = request.args.get('state')
-        
-        if not auth_code:
-            return jsonify({'error': 'No authorization code received'}), 400
-            
-        print(f"Received auth code: {auth_code[:10]}...")
-        print(f"Received state: '{state}'")
-        print(f"Session contents: {dict(session)}")  # Debug log
-        
-        # Get access token
-        token = notion_integration.get_access_token(auth_code, state if state else None)
-        make_session_permanent()
-        session['notion_token'] = token
-        
-        print(f"Received token: {token}")
-        
-        # Try multiple ways to get user_email
-        user_email = None
-        
-        # Method 1: From token data (if we added it in get_access_token)
-        user_email = token.get('user_email')
-        
-        # Method 2: From session
-        if not user_email:
-            user_email = session.get('user_email')
-            
-        # Method 3: From token owner info
-        if not user_email and 'owner' in token:
-            owner_info = token.get('owner', {})
-            if owner_info.get('type') == 'user':
-                user_info = owner_info.get('user', {})
-                if user_info.get('type') == 'person':
-                    person_info = user_info.get('person', {})
-                    user_email = person_info.get('email')
-        
-        print(f"Final user_email: {user_email}")
-        
-        # Store token
-        if user_email:
-            store_user_token(user_email, 'notion', token)
-            print(f"✅ Token stored successfully for user: {user_email}")
-        else:
-            print("❌ No user_email found - token not stored")
-            
-        return jsonify({
-            'message': 'Notion authentication successful!',
-            'token_type': token.get('token_type'),
-            'workspace_name': token.get('workspace_name', 'Unknown'),
-            'workspace_id': token.get('workspace_id'),
-            'bot_id': token.get('bot_id'),
-            'user_email': user_email,
-            'token_stored': bool(user_email)
-        })
-        
-    except Exception as e:
-        print(f"Notion OAuth callback error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': f"Authentication failed: {str(e)}"}), 400
-
-# Don't forget to add session configuration at the top of your file
-# app.config['SESSION_PERMANENT'] = True
-# app.config['PERMANENT_SESSION_LIFETIME'] = 3600  # 1 hour
-
-@app.route('/auth/notion/<user_email>')
-def auth_notion_with_email(user_email):
-    """Initiate Notion OAuth with user email"""
-    try:
-        # Store user_email in session for callback
-        make_session_permanent()
-        session['user_email'] = user_email
-        session.permanent = True  # Make session permanent
-        
-        print(f"Storing user_email in session: {user_email}")  # Debug log
-        print(f"Session after storing: {dict(session)}")  # Debug log
-        
-        # SOLUTION 2: Use the updated get_auth_url method that includes user_email in state
-        auth_url = notion_integration.get_auth_url(user_email)
-        return redirect(auth_url)
-        
-    except Exception as e:
-        return jsonify({
-            'error': 'Failed to initiate Notion authentication',
-            'details': str(e)
-        }), 500
-
-
-# Status endpoint
-@app.route('/status')
-def status():
-    """Check authentication status for all platforms"""
-    return jsonify({
-        'google_drive': 'google_token' in session,
-        'onedrive': 'microsoft_token' in session,
-        'dropbox': 'dropbox_token' in session,
-        'slack': 'slack_token' in session,
-        'notion': 'notion_token' in session
-    })
-
-# File management endpoints
-@app.route('/files/<user_email>')
-def get_user_files(user_email):
-    """Get all files for a user from Cosmos DB"""
-    try:
-        query = f"SELECT * FROM c WHERE c.user_id = '{user_email}'"
-        items = list(container.query_items(query=query, enable_cross_partition_query=True))
-        return jsonify({'files': items, 'count': len(items)})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/files/<user_email>/<platform>')
-def get_user_files_by_platform(user_email, platform):
-    """Get files for a user from a specific platform"""
-    try:
-        query = f"SELECT * FROM c WHERE c.user_id = '{user_email}' AND c.platform = '{platform}'"
-        items = list(container.query_items(query=query, enable_cross_partition_query=True))
-        return jsonify({'files': items, 'count': len(items)})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/session/info')
-def session_info():
-    """Check session information"""
-    return jsonify({
-        'session_permanent': session.permanent,
-        'session_keys': list(session.keys()),
-        'has_tokens': {
-            'google_drive': 'google_token' in session,
-            'microsoft': 'microsoft_token' in session,
-            'dropbox': 'dropbox_token' in session,
-            'notion': 'notion_token' in session
-        }
-    })
-
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0', port=5000)
