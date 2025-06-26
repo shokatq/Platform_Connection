@@ -58,7 +58,8 @@ def make_session_permanent():
 # FIXED: Helper function to generate consistent redirect URIs
 def get_redirect_uri(endpoint_name):
     """Generate consistent redirect URI for OAuth callbacks"""
-    if os.environ.get('FLASK_ENV') == 'production':
+    # Always use HTTPS for production deployment
+    if BASE_URL.startswith('https://'):
         # Use hardcoded base URL for production to avoid Flask's URL generation issues
         endpoint_mapping = {
             'auth_google_callback': f"{BASE_URL}/auth/google/callback",
@@ -69,7 +70,41 @@ def get_redirect_uri(endpoint_name):
         return endpoint_mapping.get(endpoint_name)
     else:
         # Use Flask's url_for for local development
+        return url_for(endpoint_name, _external=True, _scheme='https' if os.environ.get('FLASK_ENV') == 'production' else 'http')
+    
+def get_redirect_uri_alternative(endpoint_name):
+    """Generate consistent redirect URI for OAuth callbacks - Alternative approach"""
+    # Check if we're in production (Azure App Service)
+    is_production = (
+        os.environ.get('FLASK_ENV') == 'production' or 
+        os.environ.get('WEBSITE_SITE_NAME') or  # Azure App Service indicator
+        'azurewebsites.net' in os.environ.get('WEBSITE_HOSTNAME', '')
+    )
+    
+    if is_production:
+        # Use hardcoded HTTPS URLs for production
+        endpoint_mapping = {
+            'auth_google_callback': f"{BASE_URL}/auth/google/callback",
+            'auth_microsoft_callback': f"{BASE_URL}/auth/microsoft/callback", 
+            'auth_dropbox_callback': f"{BASE_URL}/auth/dropbox/callback",
+            'auth_notion_callback': f"{BASE_URL}/auth/notion/callback"
+        }
+        return endpoint_mapping.get(endpoint_name)
+    else:
+        # Use Flask's url_for for local development
         return url_for(endpoint_name, _external=True)
+
+# Debug function to check redirect URI generation
+def debug_redirect_uris():
+    """Debug function to check what redirect URIs are being generated"""
+    endpoints = ['auth_google_callback', 'auth_microsoft_callback', 'auth_dropbox_callback', 'auth_notion_callback']
+    
+    with app.test_request_context():
+        for endpoint in endpoints:
+            uri = get_redirect_uri(endpoint)
+            print(f"{endpoint}: {uri}")
+    
+    return {endpoint: get_redirect_uri(endpoint) for endpoint in endpoints}
 
 # Add this after your environment variable declarations
 def debug_oauth_config():
@@ -1045,6 +1080,27 @@ def sync_all_platforms():
             results[platform] = {'error': str(e)}
     
     return jsonify(results)
+
+@app.route('/debug/redirect-uris')
+def debug_redirect_uris_endpoint():
+    """Debug endpoint to check redirect URI generation"""
+    endpoints = ['auth_google_callback', 'auth_microsoft_callback', 'auth_dropbox_callback', 'auth_notion_callback']
+    
+    uris = {}
+    for endpoint in endpoints:
+        uris[endpoint] = get_redirect_uri(endpoint)
+    
+    return jsonify({
+        'redirect_uris': uris,
+        'base_url': BASE_URL,
+        'flask_env': os.environ.get('FLASK_ENV'),
+        'website_site_name': os.environ.get('WEBSITE_SITE_NAME'),
+        'website_hostname': os.environ.get('WEBSITE_HOSTNAME'),
+        'is_https': BASE_URL.startswith('https://'),
+        'request_url': request.url,
+        'request_base_url': request.base_url,
+        'request_url_root': request.url_root
+    })
 
 # User status route
 @app.route('/user/status')
