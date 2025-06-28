@@ -89,7 +89,7 @@ def get_redirect_uri(endpoint_name):
         # Use Flask's url_for for local development
         return url_for(endpoint_name, _external=True, _scheme='https')
 
-# FIXED: Create OAuth2Session with proper HTTPS handling
+# RECOMMENDED: Simpler OAuth2Session creation
 def create_oauth_session(client_id, redirect_uri, scope=None, state=None):
     """Create OAuth2Session with proper HTTPS handling for production"""
     session_kwargs = {
@@ -102,22 +102,22 @@ def create_oauth_session(client_id, redirect_uri, scope=None, state=None):
     if state:
         session_kwargs['state'] = state
     
+    # Simply create the OAuth2Session - the OAUTHLIB_INSECURE_TRANSPORT 
+    # environment variable should handle HTTPS issues
     oauth_session = OAuth2Session(**session_kwargs)
     
-    # FIXED: Force HTTPS for production environments
-    if is_production():
-        # Override the session's request method to force HTTPS
-        original_request = oauth_session.request
-        
-        def force_https_request(method, uri, headers=None, body=None, **kwargs):
-            # Ensure all OAuth requests use HTTPS
-            if uri.startswith('http://'):
-                uri = uri.replace('http://', 'https://', 1)
-            return original_request(method, uri, headers=headers, body=body, **kwargs)
-        
-        oauth_session.request = force_https_request
-    
     return oauth_session
+
+# Also update the environment variable setting at the top
+if is_production():
+    # For production behind reverse proxy (like Azure App Service)
+    os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+    os.environ['OAUTHLIB_RELAX_TOKEN_SCOPE'] = '1'  # Also helps with scope issues
+    
+    # Configure proper HTTPS detection
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+    
 # Debug function to check redirect URI generation
 def debug_redirect_uris():
     """Debug function to check what redirect URIs are being generated"""
