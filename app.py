@@ -109,16 +109,15 @@ def create_oauth_session(client_id, redirect_uri, scope=None, state=None):
         # Override the session's request method to force HTTPS
         original_request = oauth_session.request
         
-        def force_https_request(method, uri, *args, **kwargs):
+        def force_https_request(method, uri, headers=None, body=None, **kwargs):
             # Ensure all OAuth requests use HTTPS
             if uri.startswith('http://'):
                 uri = uri.replace('http://', 'https://', 1)
-            return original_request(method, uri, *args, **kwargs)
+            return original_request(method, uri, headers=headers, body=body, **kwargs)
         
         oauth_session.request = force_https_request
     
     return oauth_session
-
 # Debug function to check redirect URI generation
 def debug_redirect_uris():
     """Debug function to check what redirect URIs are being generated"""
