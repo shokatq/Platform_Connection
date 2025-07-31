@@ -68,18 +68,18 @@ def make_session_permanent():
 # FIXED: Consistent redirect URI generation for all platforms
 def get_redirect_uri(endpoint_name):
     """Generate consistent redirect URI for OAuth callbacks"""
-    # Always use hardcoded HTTPS URLs for production
     if is_production():
         endpoint_mapping = {
             'auth_google_callback': f"{BASE_URL}/auth/google/callback",
             'auth_microsoft_callback': f"{BASE_URL}/auth/microsoft/callback", 
             'auth_dropbox_callback': f"{BASE_URL}/auth/dropbox/callback",
-            'auth_notion_callback': f"{BASE_URL}/auth/notion/callback"
+            'auth_notion_callback': f"{BASE_URL}/auth/notion/callback",
+            'auth_slack_callback': f"{BASE_URL}/auth/slack/callback"  # ADD THIS LINE
         }
         return endpoint_mapping.get(endpoint_name)
     else:
-        # Use Flask's url_for for local development
         return url_for(endpoint_name, _external=True)
+
 
 # Debug function to check redirect URI generation
 def debug_redirect_uris():
@@ -194,6 +194,193 @@ def extract_departments_from_path(file_path):
     
     return list(set(departments))  # Remove duplicates
 
+def normalize_user_info(email_or_id, platform, access_token=None):
+    """Normalize user information across platforms to get consistent user data"""
+    if not email_or_id:
+        return None
+    
+    # If it's already an email, return it
+    if '@' in str(email_or_id):
+        return {
+            'email': email_or_id.lower().strip(),
+            'platform_id': email_or_id,
+            'display_name': email_or_id.split('@')[0],
+            'platform': platform
+        }
+    
+    # For platform-specific IDs, try to resolve to email/name
+    user_info = {
+        'email': None,
+        'platform_id': email_or_id,
+        'display_name': None,
+        'platform': platform
+    }
+    
+    try:
+        if platform == 'slack' and access_token:
+            headers = {'Authorization': f'Bearer {access_token}'}
+            user_response = requests.get(
+                'https://slack.com/api/users.info',
+                headers=headers,
+                params={'user': email_or_id}
+            )
+            if user_response.status_code == 200 and user_response.json().get('ok'):
+                user_data = user_response.json().get('user', {})
+                profile = user_data.get('profile', {})
+                user_info.update({
+                    'email': profile.get('email'),
+                    'display_name': profile.get('display_name') or profile.get('real_name'),
+                })
+    except Exception as e:
+        print(f"Error resolving user info for {email_or_id} on {platform}: {e}")
+    
+    return user_info
+
+def extract_enhanced_sharing_info(file_info, platform, access_token):
+    """Extract comprehensive sharing information with user details"""
+    sharing_info = {
+        'owners': [],
+        'editors': [],
+        'viewers': [],
+        'public_access': False,
+        'link_sharing': False,
+        'domain_sharing': None,
+        'groups': [],
+        'channels': []
+    }
+    
+    try:
+        if platform == 'google_drive':
+            headers = {'Authorization': f'Bearer {access_token}'}
+            file_id = file_info.get('id')
+            
+            permissions_url = f'https://www.googleapis.com/drive/v3/files/{file_id}/permissions'
+            response = requests.get(permissions_url, headers=headers)
+            
+            if response.status_code == 200:
+                permissions = response.json().get('permissions', [])
+                
+                for perm in permissions:
+                    user_info = normalize_user_info(
+                        perm.get('emailAddress'), platform, access_token
+                    )
+                    
+                    role = perm.get('role')
+                    perm_type = perm.get('type')
+                    
+                    if perm_type == 'anyone':
+                        sharing_info['public_access'] = True
+                        sharing_info['link_sharing'] = True
+                    elif perm_type == 'domain':
+                        sharing_info['domain_sharing'] = perm.get('domain')
+                    elif user_info and user_info['email']:
+                        if role == 'owner':
+                            sharing_info['owners'].append(user_info)
+                        elif role == 'writer':
+                            sharing_info['editors'].append(user_info)
+                        elif role == 'reader':
+                            sharing_info['viewers'].append(user_info)
+        
+        elif platform == 'slack':
+            channels = file_info.get('channels', [])
+            groups = file_info.get('groups', [])
+            ims = file_info.get('ims', [])
+            
+            sharing_info['public_access'] = file_info.get('is_public', False)
+            sharing_info['channels'] = channels + groups + ims
+            
+            user_id = file_info.get('user')
+            if user_id:
+                owner_info = normalize_user_info(user_id, platform, access_token)
+                if owner_info:
+                    sharing_info['owners'].append(owner_info)
+        
+        elif platform == 'onedrive':
+            headers = {'Authorization': f'Bearer {access_token}'}
+            file_id = file_info.get('id')
+            
+            permissions_url = f'https://graph.microsoft.com/v1.0/me/drive/items/{file_id}/permissions'
+            response = requests.get(permissions_url, headers=headers)
+            
+            if response.status_code == 200:
+                permissions = response.json().get('value', [])
+                
+                for perm in permissions:
+                    roles = perm.get('roles', [])
+                    link = perm.get('link', {})
+                    
+                    if link:
+                        sharing_info['link_sharing'] = True
+                        if link.get('scope') == 'anonymous':
+                            sharing_info['public_access'] = True
+                    
+                    granted_to = perm.get('grantedTo', {}) or perm.get('grantedToV2', {})
+                    user = granted_to.get('user', {})
+                    
+                    if user.get('email'):
+                        user_info = normalize_user_info(user['email'], platform, access_token)
+                        
+                        if 'owner' in roles:
+                            sharing_info['owners'].append(user_info)
+                        elif 'write' in roles:
+                            sharing_info['editors'].append(user_info)
+                        elif 'read' in roles:
+                            sharing_info['viewers'].append(user_info)
+        
+        elif platform == 'dropbox':
+            headers = {'Authorization': f'Bearer {access_token}'}
+            file_path = file_info.get('path_lower')
+            
+            sharing_url = 'https://api.dropboxapi.com/2/sharing/list_file_members'
+            response = requests.post(sharing_url, headers=headers, json={'file': file_path})
+            
+            if response.status_code == 200:
+                members = response.json()
+                
+                for member in members.get('users', []):
+                    user = member.get('user', {})
+                    access_type = member.get('access_type', {}).get('.tag')
+                    
+                    if user.get('email'):
+                        user_info = normalize_user_info(user['email'], platform, access_token)
+                        
+                        if access_type == 'owner':
+                            sharing_info['owners'].append(user_info)
+                        elif access_type == 'editor':
+                            sharing_info['editors'].append(user_info)
+                        elif access_type == 'viewer':
+                            sharing_info['viewers'].append(user_info)
+    
+    except Exception as e:
+        print(f"Error extracting enhanced sharing info: {e}")
+    
+    return sharing_info
+
+def determine_enhanced_visibility(sharing_info, file_path, platform):
+    """Determine file visibility based on enhanced sharing information"""
+    if sharing_info.get('public_access'):
+        return 'public'
+    
+    if sharing_info.get('link_sharing'):
+        return 'link_shared'
+    
+    if sharing_info.get('domain_sharing'):
+        return 'domain_shared'
+    
+    total_shared_users = (
+        len(sharing_info.get('editors', [])) + 
+        len(sharing_info.get('viewers', []))
+    )
+    
+    if total_shared_users == 0:
+        return 'private'
+    elif total_shared_users <= 5:
+        return 'team_shared'
+    elif total_shared_users <= 20:
+        return 'department_shared'
+    else:
+        return 'organization_shared'
+
 def determine_visibility(file_path, platform, shared_with=None, created_by=None):
     """Determine file visibility based on path, platform, and sharing info"""
     path_lower = file_path.lower()
@@ -289,34 +476,25 @@ class PlatformIntegration:
             print(f"Error uploading to blob storage: {e}")
             return None
     
-    def save_file_metadata(self, user_id, filename, blob_path, platform, original_date, 
-                          file_size=None, mime_type=None, shared_with=None, created_by=None, 
-                          platform_file_info=None):
-        """Save enhanced file metadata to Cosmos DB with RBAC fields"""
+    def save_enhanced_file_metadata(self, user_id, filename, blob_path, platform, original_date, 
+                                   file_size=None, mime_type=None, file_info=None, access_token=None):
+        """Enhanced metadata saving with comprehensive owner/sharing information"""
         try:
-            # Generate SAS URL
             sas_url = generate_sas_url(blob_path)
-            
-            # Extract departments from file path
             departments = extract_departments_from_path(blob_path)
+            sharing_info = extract_enhanced_sharing_info(file_info or {}, platform, access_token)
+            visibility = determine_enhanced_visibility(sharing_info, blob_path, platform)
             
-            # Determine visibility
-            visibility = determine_visibility(blob_path, platform, shared_with, created_by)
+            owners = sharing_info.get('owners', [])
+            all_shared_users = (
+                sharing_info.get('editors', []) + 
+                sharing_info.get('viewers', [])
+            )
             
-            # Ensure created_by is a list and includes the user_id
-            if created_by is None:
-                created_by = [user_id]
-            elif isinstance(created_by, str):
-                created_by = [created_by]
-            elif isinstance(created_by, list):
-                if user_id not in created_by:
-                    created_by.append(user_id)
-            
-            # Ensure shared_with is a list
-            if shared_with is None:
-                shared_with = []
-            elif isinstance(shared_with, str):
-                shared_with = [shared_with]
+            syncing_user_info = normalize_user_info(user_id, platform, access_token)
+            if syncing_user_info and syncing_user_info not in owners:
+                if not owners:
+                    owners.append(syncing_user_info)
             
             metadata = {
                 "id": str(uuid.uuid4()),
@@ -331,22 +509,54 @@ class PlatformIntegration:
                 "mime_type": mime_type,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 
-                # New RBAC fields
                 "sas_url": sas_url,
                 "department": departments,
-                "shared_with": shared_with,
-                "created_by": created_by,
                 "visibility": visibility,
                 
-                # Additional platform-specific metadata
-                "platform_metadata": platform_file_info or {}
+                "owners": [
+                    {
+                        "email": owner.get('email'),
+                        "display_name": owner.get('display_name'),
+                        "platform_id": owner.get('platform_id'),
+                        "role": "owner"
+                    } for owner in owners
+                ],
+                
+                "shared_with": [
+                    {
+                        "email": user.get('email'),
+                        "display_name": user.get('display_name'),
+                        "platform_id": user.get('platform_id'),
+                        "role": "editor" if user in sharing_info.get('editors', []) else "viewer",
+                        "shared_date": datetime.now(timezone.utc).isoformat()
+                    } for user in all_shared_users
+                ],
+                
+                "access_control": {
+                    "public_access": sharing_info.get('public_access', False),
+                    "link_sharing": sharing_info.get('link_sharing', False),
+                    "domain_sharing": sharing_info.get('domain_sharing'),
+                    "groups_with_access": sharing_info.get('groups', []),
+                    "channels_with_access": sharing_info.get('channels', [])
+                },
+                
+                # Legacy fields for backwards compatibility
+                "created_by": [owner.get('email') for owner in owners if owner.get('email')],
+                
+                "platform_metadata": {
+                    **(file_info or {}),
+                    "sync_timestamp": datetime.now(timezone.utc).isoformat(),
+                    "sharing_last_updated": datetime.now(timezone.utc).isoformat()
+                }
             }
             
             container.create_item(body=metadata)
             return metadata
+            
         except Exception as e:
-            print(f"Error saving metadata: {e}")
+            print(f"Error saving enhanced metadata: {e}")
             return None
+
 
 # Google Drive Integration
 class GoogleDriveIntegration(PlatformIntegration):
@@ -1032,12 +1242,187 @@ class NotionIntegration(PlatformIntegration):
                         synced_files.append(metadata)
         
         return {'synced_files': synced_files, 'count': len(synced_files)}
+    
+class SlackIntegration(PlatformIntegration):
+    def __init__(self):
+        super().__init__()
+        self.authorization_base_url = 'https://slack.com/oauth/v2/authorize'
+        self.token_url = 'https://slack.com/api/oauth.v2.access'
+        self.scope = ['files:read', 'channels:read', 'groups:read', 'im:read', 'mpim:read', 'users:read', 'users:read.email']
+    
+    def get_auth_url(self, user_email=None):
+        """Get Slack OAuth authorization URL"""
+        if not SLACK_CLIENT_ID:
+            raise ValueError("SLACK_CLIENT_ID not configured")
+            
+        redirect_uri = get_redirect_uri('auth_slack_callback')
+        print(f"Slack redirect URI: {redirect_uri}")
+        
+        state = str(uuid.uuid4())
+        
+        session[f'slack_oauth_state_{state}'] = {
+            'state': state,
+            'user_email': user_email
+        }
+        
+        params = {
+            'client_id': SLACK_CLIENT_ID,
+            'redirect_uri': redirect_uri,
+            'scope': ' '.join(self.scope),
+            'state': state,
+            'response_type': 'code'
+        }
+        return f"{self.authorization_base_url}?{urlencode(params)}"
+    
+    def get_access_token(self, authorization_code, state):
+        """Exchange authorization code for access token"""
+        if not SLACK_CLIENT_ID or not SLACK_CLIENT_SECRET:
+            raise ValueError("Slack OAuth credentials not configured")
+            
+        state_data = session.get(f'slack_oauth_state_{state}')
+        if not state_data or state_data['state'] != state:
+            raise ValueError("State mismatch - possible CSRF attack")
+            
+        redirect_uri = get_redirect_uri('auth_slack_callback')
+        
+        data = {
+            'client_id': SLACK_CLIENT_ID,
+            'client_secret': SLACK_CLIENT_SECRET,
+            'code': authorization_code,
+            'redirect_uri': redirect_uri
+        }
+        
+        response = requests.post(self.token_url, data=data)
+        if response.status_code != 200:
+            raise ValueError(f"Failed to get access token: {response.text}")
+        
+        token_data = response.json()
+        if not token_data.get('ok'):
+            raise ValueError(f"Slack OAuth error: {token_data.get('error', 'Unknown error')}")
+        
+        del session[f'slack_oauth_state_{state}']
+        
+        return token_data, state_data['user_email']
+    
+    def get_file_sharing_info(self, file_info, access_token):
+        """Get sharing information for a Slack file"""
+        return extract_enhanced_sharing_info(file_info, 'slack', access_token)
+    
+    def download_slack_file(self, file_url, access_token):
+        """Download file from Slack using the private download URL"""
+        headers = {'Authorization': f'Bearer {access_token}'}
+        
+        try:
+            response = requests.get(file_url, headers=headers)
+            if response.status_code == 200:
+                return response.content
+            else:
+                print(f"Failed to download file from {file_url}: {response.status_code}")
+                return None
+        except Exception as e:
+            print(f"Error downloading file from Slack: {e}")
+            return None
+    
+    def sync_files(self, access_token, user_email):
+        """Sync files from Slack with enhanced metadata"""
+        headers = {'Authorization': f'Bearer {access_token}'}
+        
+        synced_files = []
+        
+        try:
+            files_list_url = 'https://slack.com/api/files.list'
+            params = {
+                'count': 100,
+                'types': 'all'
+            }
+            
+            response = requests.get(files_list_url, headers=headers, params=params)
+            if response.status_code != 200:
+                return {'error': 'Failed to fetch files from Slack'}
+            
+            response_data = response.json()
+            if not response_data.get('ok'):
+                return {'error': f"Slack API error: {response_data.get('error', 'Unknown error')}"}
+            
+            files = response_data.get('files', [])
+            
+            for file_info in files:
+                filename = file_info.get('name', '')
+                
+                file_content = None
+                is_supported = self.is_supported_file(filename)
+                
+                if is_supported:
+                    private_url = file_info.get('url_private_download') or file_info.get('url_private')
+                    if private_url:
+                        file_content = self.download_slack_file(private_url, access_token)
+                else:
+                    file_info_text = f"Slack File Metadata\n"
+                    file_info_text += f"Original filename: {filename}\n"
+                    file_info_text += f"File type: {file_info.get('filetype', 'unknown')}\n"
+                    file_info_text += f"Size: {file_info.get('size', 0)} bytes\n"
+                    file_info_text += f"Title: {file_info.get('title', 'No title')}\n"
+                    file_info_text += f"URL: {file_info.get('permalink', 'No URL')}\n"
+                    
+                    file_content = file_info_text.encode('utf-8')
+                    filename = f"{os.path.splitext(filename)[0]}_metadata.txt"
+                
+                if file_content:
+                    sharing_info = self.get_file_sharing_info(file_info, access_token)
+                    
+                    blob_path = self.upload_to_blob_storage(
+                        file_content, 
+                        user_email, 
+                        filename
+                    )
+                    
+                    if blob_path:
+                        created_timestamp = file_info.get('created')
+                        original_date = None
+                        if created_timestamp:
+                            original_date = datetime.fromtimestamp(created_timestamp, tz=timezone.utc)
+                        
+                        platform_file_info = {
+                            'slack_file_id': file_info.get('id'),
+                            'slack_team_id': file_info.get('team'),
+                            'permalink': file_info.get('permalink'),
+                            'channels': file_info.get('channels', []),
+                            'groups': file_info.get('groups', []),
+                            'ims': file_info.get('ims', []),
+                            'original_filetype': file_info.get('filetype'),
+                            'is_external': file_info.get('is_external', False),
+                            'is_public': file_info.get('is_public', False)
+                        }
+                        
+                        metadata = self.save_enhanced_file_metadata(
+                            user_email,
+                            filename,
+                            blob_path,
+                            'slack',
+                            original_date,
+                            file_info.get('size'),
+                            file_info.get('mimetype'),
+                            file_info,
+                            access_token
+                        )
+                        
+                        if metadata:
+                            synced_files.append(metadata)
+        
+        except Exception as e:
+            print(f"Error syncing Slack files: {e}")
+            return {'error': str(e)}
+        
+        return {'synced_files': synced_files, 'count': len(synced_files)}
+
+
 
 # Initialize platform integrations
 google_drive = GoogleDriveIntegration()
 onedrive = OneDriveIntegration()
 dropbox = DropboxIntegration()
 notion = NotionIntegration()
+slack = SlackIntegration()
 
 # Helper function to save user platform tokens
 def save_user_platform_token(user_email, platform, token_data):
@@ -1420,6 +1805,153 @@ def sync_all_platforms():
         return jsonify({
             'user_email': user_email,
             'sync_results': results
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@app.route('/auth/slack')
+def auth_slack():
+    """Initiate Slack OAuth"""
+    try:
+        user_email = request.args.get('user_email')
+        if not user_email:
+            return jsonify({'error': 'user_email parameter required'}), 400
+        
+        auth_url = slack.get_auth_url(user_email)
+        return redirect(auth_url)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/auth/slack/callback')
+def auth_slack_callback():
+    """Handle Slack OAuth callback"""
+    try:
+        code = request.args.get('code')
+        state = request.args.get('state')
+        error = request.args.get('error')
+        
+        if error:
+            return jsonify({'error': f'Slack OAuth error: {error}'}), 400
+        
+        if not code or not state:
+            return jsonify({'error': 'Missing authorization code or state'}), 400
+        
+        token_data, user_email = slack.get_access_token(code, state)
+        
+        if save_user_platform_token(user_email, 'slack', token_data):
+            return jsonify({
+                'message': 'Slack connected successfully',
+                'user_email': user_email,
+                'platform': 'slack',
+                'team_name': token_data.get('team', {}).get('name', 'Unknown team')
+            })
+        else:
+            return jsonify({'error': 'Failed to save token'}), 500
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/sync/slack')
+def sync_slack():
+    """Sync files from Slack"""
+    try:
+        user_email = request.args.get('user_email')
+        if not user_email:
+            return jsonify({'error': 'user_email parameter required'}), 400
+        
+        token_data = get_user_platform_token(user_email, 'slack')
+        if not token_data:
+            return jsonify({'error': 'No Slack token found. Please authenticate first.'}), 401
+        
+        access_token = token_data.get('access_token')
+        result = slack.sync_files(access_token, user_email)
+        
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+@app.route('/files/owned-by/<owner_email>')
+def get_files_owned_by(owner_email):
+    """API endpoint to get files owned by a specific user"""
+    try:
+        user_id = request.args.get('user_id')
+        
+        query = """
+        SELECT * FROM c 
+        WHERE ARRAY_CONTAINS(c.owners, {'email': @owner_email}, true)
+        """
+        parameters = [{"name": "@owner_email", "value": owner_email}]
+        
+        if user_id:
+            query += " AND c.user_id = @user_id"
+            parameters.append({"name": "@user_id", "value": user_id})
+        
+        files = list(container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True
+        ))
+        
+        return jsonify({
+            'owner_email': owner_email,
+            'files': files,
+            'count': len(files)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/files/shared-with/<user_email>')  
+def get_files_shared_with(user_email):
+    """API endpoint to get files shared with a specific user"""
+    try:
+        user_id = request.args.get('user_id')
+        
+        query = """
+        SELECT * FROM c 
+        WHERE ARRAY_CONTAINS(c.shared_with, {'email': @user_email}, true)
+        """
+        parameters = [{"name": "@user_email", "value": user_email}]
+        
+        if user_id:
+            query += " AND c.user_id = @user_id"
+            parameters.append({"name": "@user_id", "value": user_id})
+        
+        files = list(container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True
+        ))
+        
+        return jsonify({
+            'shared_with': user_email,
+            'files': files,
+            'count': len(files)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/files/by-visibility/<visibility>')
+def get_files_by_visibility_level(visibility):
+    """API endpoint to get files by visibility level"""
+    try:
+        user_id = request.args.get('user_id')
+        
+        query = "SELECT * FROM c WHERE c.visibility = @visibility"
+        parameters = [{"name": "@visibility", "value": visibility}]
+        
+        if user_id:
+            query += " AND c.user_id = @user_id"
+            parameters.append({"name": "@user_id", "value": user_id})
+        
+        files = list(container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True
+        ))
+        
+        return jsonify({
+            'visibility': visibility,
+            'files': files,
+            'count': len(files)
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
