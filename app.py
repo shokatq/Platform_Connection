@@ -3,6 +3,7 @@ import json
 import uuid
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify, redirect, session, url_for
+from flask_socketio import SocketIO, emit, join_room, leave_room
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 from azure.cosmos import CosmosClient
 import requests
@@ -12,9 +13,14 @@ import mimetypes
 from urllib.parse import urlencode
 import base64
 import re
+from flask_cors import CORS
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'baigan77')
+
+# Enable CORS and WebSocket
+CORS(app, origins=["*"], supports_credentials=True)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # Configuration
 AZURE_STORAGE_CONNECTION_STRING = os.getenv('AZURE_STORAGE_CONNECTION_STRING_1')
@@ -38,15 +44,16 @@ SLACK_CLIENT_SECRET = os.getenv('SLACK_CLIENT_SECRET')
 NOTION_CLIENT_ID = os.environ.get('NOTION_CLIENT_ID')
 NOTION_CLIENT_SECRET = os.environ.get('NOTION_CLIENT_SECRET')
 
-# FIXED: Improved base URL configuration
 BASE_URL = os.environ.get('BASE_URL', 'https://platform-connection-api-g0b5c3fve2dfb2ag.canadacentral-01.azurewebsites.net')
 
-# FIXED: Better production detection
+# Frontend URL for redirects after auth
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
+
 def is_production():
     """Detect if running in production environment"""
     return (
         os.environ.get('FLASK_ENV') == 'production' or 
-        os.environ.get('WEBSITE_SITE_NAME') or  # Azure App Service indicator
+        os.environ.get('WEBSITE_SITE_NAME') or
         'azurewebsites.net' in os.environ.get('WEBSITE_HOSTNAME', '') or
         BASE_URL.startswith('https://')
     )
@@ -57,7 +64,6 @@ app.config['SESSION_COOKIE_SECURE'] = is_production()
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
-# FIXED: Force HTTPS in production
 if is_production():
     app.config['PREFERRED_URL_SCHEME'] = 'https'
 
@@ -65,7 +71,6 @@ def make_session_permanent():
     """Make current session permanent"""
     session.permanent = True
 
-# FIXED: Consistent redirect URI generation for all platforms
 def get_redirect_uri(endpoint_name):
     """Generate consistent redirect URI for OAuth callbacks"""
     if is_production():
@@ -74,51 +79,83 @@ def get_redirect_uri(endpoint_name):
             'auth_microsoft_callback': f"{BASE_URL}/auth/microsoft/callback", 
             'auth_dropbox_callback': f"{BASE_URL}/auth/dropbox/callback",
             'auth_notion_callback': f"{BASE_URL}/auth/notion/callback",
-            'auth_slack_callback': f"{BASE_URL}/auth/slack/callback"  # ADD THIS LINE
+            'auth_slack_callback': f"{BASE_URL}/auth/slack/callback"
         }
         return endpoint_mapping.get(endpoint_name)
     else:
         return url_for(endpoint_name, _external=True)
 
+# WebSocket event handlers
+@socketio.on('connect')
+def handle_connect():
+    print('Client connected')
 
-# Debug function to check redirect URI generation
-def debug_redirect_uris():
-    """Debug function to check what redirect URIs are being generated"""
-    endpoints = ['auth_google_callback', 'auth_microsoft_callback', 'auth_dropbox_callback', 'auth_notion_callback']
-    
-    uris = {}
-    for endpoint in endpoints:
-        uris[endpoint] = get_redirect_uri(endpoint)
-    
-    print("=== REDIRECT URI DEBUG ===")
-    for endpoint, uri in uris.items():
-        print(f"{endpoint}: {uri}")
-    print("===========================")
-    
-    return uris
+@socketio.on('disconnect')
+def handle_disconnect():
+    print('Client disconnected')
 
-def debug_oauth_config():
-    config_status = {
-        'GOOGLE_CLIENT_ID': bool(GOOGLE_CLIENT_ID),
-        'GOOGLE_CLIENT_SECRET': bool(GOOGLE_CLIENT_SECRET),
-        'MICROSOFT_CLIENT_ID': bool(MICROSOFT_CLIENT_ID),
-        'MICROSOFT_CLIENT_SECRET': bool(MICROSOFT_CLIENT_SECRET),
-        'DROPBOX_CLIENT_ID': bool(DROPBOX_CLIENT_ID),
-        'DROPBOX_CLIENT_SECRET': bool(DROPBOX_CLIENT_SECRET),
-        'NOTION_CLIENT_ID': bool(NOTION_CLIENT_ID),
-        'NOTION_CLIENT_SECRET': bool(NOTION_CLIENT_SECRET),
-        'BASE_URL': BASE_URL,
-        'IS_PRODUCTION': is_production(),
-        'FLASK_ENV': os.environ.get('FLASK_ENV'),
-        'WEBSITE_SITE_NAME': os.environ.get('WEBSITE_SITE_NAME'),
-        'WEBSITE_HOSTNAME': os.environ.get('WEBSITE_HOSTNAME')
-    }
-    print("OAuth Configuration Status:", config_status)
-    return config_status
+@socketio.on('join_user_room')
+def handle_join_room(data):
+    """Join user to their specific room for real-time updates"""
+    user_email = data.get('user_email')
+    if user_email:
+        join_room(user_email)
+        emit('room_joined', {'user_email': user_email})
 
-# Call this on startup
-debug_oauth_config()
-debug_redirect_uris()
+@socketio.on('leave_user_room')
+def handle_leave_room(data):
+    """Leave user room"""
+    user_email = data.get('user_email')
+    if user_email:
+        leave_room(user_email)
+
+def notify_client(user_email, event_type, data):
+    """Send real-time notification to client"""
+    socketio.emit(event_type, data, room=user_email)
+
+def save_user_platform_token(user_email, platform, token_data):
+    """Save user's platform access token to blob storage with real-time update"""
+    try:
+        user_blob_client = blob_service_client.get_blob_client(
+            container=AZURE_USER_STORAGE_CONTAINER,
+            blob=f"{user_email}/{platform}_token.json"
+        )
+        
+        token_json = json.dumps(token_data)
+        user_blob_client.upload_blob(token_json, overwrite=True)
+        
+        # Notify client of connection status change
+        notify_client(user_email, 'platform_status_changed', {
+            'platform': platform,
+            'connected': True,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        })
+        
+        return True
+    except Exception as e:
+        print(f"Error saving token for {user_email} - {platform}: {e}")
+        return False
+
+def get_user_platform_token(user_email, platform):
+    """Retrieve user's platform access token from blob storage"""
+    try:
+        user_blob_client = blob_service_client.get_blob_client(
+            container=AZURE_USER_STORAGE_CONTAINER,
+            blob=f"{user_email}/{platform}_token.json"
+        )
+        
+        blob_data = user_blob_client.download_blob()
+        token_data = json.loads(blob_data.readall())
+        return token_data
+    except Exception as e:
+        print(f"Error retrieving token for {user_email} - {platform}: {e}")
+        return None
+
+# Initialize Azure clients (keeping existing implementation)
+blob_service_client = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
+cosmos_client = CosmosClient(COSMOS_ENDPOINT, COSMOS_KEY)
+database = cosmos_client.get_database_client(COSMOS_DATABASE)
+container = database.get_container_client(COSMOS_CONTAINER)
 
 # Supported file extensions
 SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.xlsx', '.doc', '.ppt', '.xls'}
@@ -1503,26 +1540,45 @@ def auth_google():
 
 @app.route('/auth/google/callback')
 def auth_google_callback():
-    """Handle Google Drive OAuth callback"""
+    """Handle Google Drive OAuth callback with real-time updates"""
     try:
         user_email = session.get('user_email')
         if not user_email:
-            return jsonify({'error': 'Session expired'}), 400
+            # Redirect to frontend with error
+            return redirect(f"{FRONTEND_URL}?auth_error=session_expired")
         
+        google_drive = GoogleDriveIntegration()
         token = google_drive.get_access_token(request.url)
         
-        # Save token
         if save_user_platform_token(user_email, 'google_drive', token):
-            return jsonify({
-                'message': 'Google Drive connected successfully',
-                'user_email': user_email,
-                'platform': 'google_drive'
+            # Notify client of successful connection
+            notify_client(user_email, 'platform_connected', {
+                'platform': 'google_drive',
+                'platform_name': 'Google Drive',
+                'success': True,
+                'message': 'Google Drive connected successfully!'
             })
+            
+            # Auto-trigger sync
+            socketio.start_background_task(target=auto_sync_platform, user_email=user_email, platform='google_drive', token=token)
+            
+            # Redirect to frontend with success
+            return redirect(f"{FRONTEND_URL}?auth_success=google_drive")
         else:
-            return jsonify({'error': 'Failed to save token'}), 500
+            notify_client(user_email, 'platform_connection_error', {
+                'platform': 'google_drive',
+                'error': 'Failed to save authentication token'
+            })
+            return redirect(f"{FRONTEND_URL}?auth_error=save_failed")
             
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        user_email = session.get('user_email')
+        if user_email:
+            notify_client(user_email, 'platform_connection_error', {
+                'platform': 'google_drive',
+                'error': str(e)
+            })
+        return redirect(f"{FRONTEND_URL}?auth_error=connection_failed")
 
 @app.route('/sync/google')
 def sync_google():
@@ -1824,29 +1880,217 @@ def auth_slack():
 
 @app.route('/auth/slack/callback')
 def auth_slack_callback():
-    """Handle Slack OAuth callback"""
+    """Handle Slack OAuth callback with real-time updates"""
     try:
         code = request.args.get('code')
         state = request.args.get('state')
         error = request.args.get('error')
         
+        # Get user email from state session
+        state_data = session.get(f'slack_oauth_state_{state}')
+        user_email = state_data.get('user_email') if state_data else None
+        
         if error:
-            return jsonify({'error': f'Slack OAuth error: {error}'}), 400
+            if user_email:
+                notify_client(user_email, 'platform_connection_error', {
+                    'platform': 'slack',
+                    'error': f'Slack OAuth error: {error}'
+                })
+            return redirect(f"{FRONTEND_URL}?auth_error=oauth_error")
         
-        if not code or not state:
-            return jsonify({'error': 'Missing authorization code or state'}), 400
+        if not code or not state or not user_email:
+            if user_email:
+                notify_client(user_email, 'platform_connection_error', {
+                    'platform': 'slack',
+                    'error': 'Missing authorization code or state'
+                })
+            return redirect(f"{FRONTEND_URL}?auth_error=missing_params")
         
+        slack = SlackIntegration()
         token_data, user_email = slack.get_access_token(code, state)
         
         if save_user_platform_token(user_email, 'slack', token_data):
-            return jsonify({
-                'message': 'Slack connected successfully',
-                'user_email': user_email,
+            notify_client(user_email, 'platform_connected', {
                 'platform': 'slack',
-                'team_name': token_data.get('team', {}).get('name', 'Unknown team')
+                'platform_name': 'Slack',
+                'success': True,
+                'message': f'Slack connected successfully! Team: {token_data.get("team", {}).get("name", "Unknown")}'
+            })
+            
+            # Auto-trigger sync
+            socketio.start_background_task(target=auto_sync_platform, user_email=user_email, platform='slack', token=token_data)
+            
+            return redirect(f"{FRONTEND_URL}?auth_success=slack")
+        else:
+            notify_client(user_email, 'platform_connection_error', {
+                'platform': 'slack',
+                'error': 'Failed to save authentication token'
+            })
+            return redirect(f"{FRONTEND_URL}?auth_error=save_failed")
+            
+    except Exception as e:
+        # Try to get user email from session or state
+        user_email = None
+        state = request.args.get('state')
+        if state:
+            state_data = session.get(f'slack_oauth_state_{state}')
+            user_email = state_data.get('user_email') if state_data else None
+        
+        if user_email:
+            notify_client(user_email, 'platform_connection_error', {
+                'platform': 'slack',
+                'error': str(e)
+            })
+        return redirect(f"{FRONTEND_URL}?auth_error=connection_failed")
+
+def auto_sync_platform(user_email, platform, token):
+    """Background task to automatically sync platform files after connection"""
+    try:
+        # Notify client that sync is starting
+        notify_client(user_email, 'sync_started', {
+            'platform': platform,
+            'message': f'Starting to sync files from {platform}...'
+        })
+        
+        # Perform sync based on platform
+        if platform == 'google_drive':
+            google_drive = GoogleDriveIntegration()
+            result = google_drive.sync_files(token.get('access_token'), user_email)
+        elif platform == 'slack':
+            slack = SlackIntegration()
+            result = slack.sync_files(token.get('access_token'), user_email)
+        # Add other platforms as needed
+        
+        # Notify client of sync completion
+        if 'error' in result:
+            notify_client(user_email, 'sync_error', {
+                'platform': platform,
+                'error': result['error']
             })
         else:
-            return jsonify({'error': 'Failed to save token'}), 500
+            notify_client(user_email, 'sync_completed', {
+                'platform': platform,
+                'files_synced': result.get('count', 0),
+                'message': f'Successfully synced {result.get("count", 0)} files from {platform}'
+            })
+            
+    except Exception as e:
+        notify_client(user_email, 'sync_error', {
+            'platform': platform,
+            'error': str(e)
+
+        })
+
+
+@app.route('/sync/<platform>')
+def sync_platform(platform):
+    """Enhanced sync endpoint with real-time updates"""
+    try:
+        user_email = request.args.get('user_email')
+        if not user_email:
+            return jsonify({'error': 'user_email parameter required'}), 400
+        
+        platform_mapping = {
+            'google': 'google_drive',
+            'microsoft': 'onedrive',
+            'dropbox': 'dropbox',
+            'notion': 'notion',
+            'slack': 'slack'
+        }
+        
+        actual_platform = platform_mapping.get(platform)
+        if not actual_platform:
+            return jsonify({'error': f'Unsupported platform: {platform}'}), 400
+        
+        # Get stored token
+        token_data = get_user_platform_token(user_email, actual_platform)
+        if not token_data:
+            return jsonify({'error': f'No {platform} token found. Please authenticate first.'}), 401
+        
+        # Start sync in background and notify client
+        socketio.start_background_task(target=auto_sync_platform, 
+                                     user_email=user_email, 
+                                     platform=actual_platform, 
+                                     token=token_data)
+        
+        return jsonify({
+            'message': f'{platform} sync started',
+            'user_email': user_email,
+            'platform': platform
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/platforms/status')
+def platforms_status():
+    """Get status of all platform connections for a user with real-time capability"""
+    try:
+        user_email = request.args.get('user_email')
+        if not user_email:
+            return jsonify({'error': 'user_email parameter required'}), 400
+        
+        platforms = ['google_drive', 'onedrive', 'dropbox', 'notion', 'slack']
+        status = {}
+        
+        for platform in platforms:
+            token_data = get_user_platform_token(user_email, platform)
+            status[platform] = {
+                'connected': bool(token_data),
+                'last_updated': token_data.get('created_at') if token_data else None
+            }
+        
+        return jsonify({
+            'user_email': user_email,
+            'platforms': status,
+            'websocket_enabled': True
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Disconnect platform endpoint
+@app.route('/disconnect/<platform>', methods=['POST'])
+def disconnect_platform(platform):
+    """Disconnect a platform and notify client"""
+    try:
+        user_email = request.json.get('user_email')
+        if not user_email:
+            return jsonify({'error': 'user_email required'}), 400
+        
+        platform_mapping = {
+            'google': 'google_drive',
+            'microsoft': 'onedrive',
+            'dropbox': 'dropbox',
+            'notion': 'notion',
+            'slack': 'slack'
+        }
+        
+        actual_platform = platform_mapping.get(platform, platform)
+        
+        # Delete token from storage
+        try:
+            user_blob_client = blob_service_client.get_blob_client(
+                container=AZURE_USER_STORAGE_CONTAINER,
+                blob=f"{user_email}/{actual_platform}_token.json"
+            )
+            user_blob_client.delete_blob()
+            
+            # Notify client
+            notify_client(user_email, 'platform_disconnected', {
+                'platform': actual_platform,
+                'platform_name': platform.replace('_', ' ').title(),
+                'message': f'{platform} has been disconnected successfully'
+            })
+            
+            return jsonify({
+                'message': f'{platform} disconnected successfully',
+                'platform': actual_platform
+            })
+            
+        except Exception as e:
+            if 'BlobNotFound' in str(e):
+                return jsonify({'message': f'{platform} was not connected'}), 200
+            raise e
             
     except Exception as e:
         return jsonify({'error': str(e)}), 500
