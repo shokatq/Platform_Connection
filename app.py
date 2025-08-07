@@ -1779,30 +1779,30 @@ def sync_notion():
         return jsonify({'error': str(e)}), 500
 
 # Utility Routes
-@app.route('/platforms/status')
-def platforms_status():
-    """Get status of all platform connections for a user"""
-    try:
-        user_email = request.args.get('user_email')
-        if not user_email:
-            return jsonify({'error': 'user_email parameter required'}), 400
-        
-        platforms = ['google_drive', 'onedrive', 'dropbox', 'notion']
-        status = {}
-        
-        for platform in platforms:
-            token_data = get_user_platform_token(user_email, platform)
-            status[platform] = {
-                'connected': bool(token_data),
-                'last_updated': token_data.get('created_at') if token_data else None
-            }
-        
-        return jsonify({
-            'user_email': user_email,
-            'platforms': status
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+#@app.route('/platforms/status')
+#def platforms_status():
+#    """Get status of all platform connections for a user"""
+#    try:
+#        user_email = request.args.get('user_email')
+#        if not user_email:
+#            return jsonify({'error': 'user_email parameter required'}), 400
+#        
+#        platforms = ['google_drive', 'onedrive', 'dropbox', 'notion']
+#        status = {}
+#        
+#        for platform in platforms:
+#            token_data = get_user_platform_token(user_email, platform)
+#            status[platform] = {
+#                'connected': bool(token_data),
+#                'last_updated': token_data.get('created_at') if token_data else None
+#            }
+#        
+#        return jsonify({
+#            'user_email': user_email,
+#            'platforms': status
+#        })
+#    except Exception as e:
+#        return jsonify({'error': str(e)}), 500
 
 @app.route('/files/user/<user_email>')
 def get_user_files():
