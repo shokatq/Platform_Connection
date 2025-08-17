@@ -44,7 +44,7 @@ SLACK_CLIENT_SECRET = os.getenv('SLACK_CLIENT_SECRET')
 NOTION_CLIENT_ID = os.environ.get('NOTION_CLIENT_ID')
 NOTION_CLIENT_SECRET = os.environ.get('NOTION_CLIENT_SECRET')
 
-BASE_URL = os.environ.get('BASE_URL', 'https://platform-connection-api-g0b5c3fve2dfb2ag.canadacentral-01.azurewebsites.net')
+BASE_URL = 'https://platform-connection-api-g0b5c3fve2dfb2ag.canadacentral-01.azurewebsites.net' #BASE_URL
 
 # Frontend URL for redirects after auth
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
