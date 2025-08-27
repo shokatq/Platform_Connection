@@ -712,12 +712,183 @@ class NotionIntegration(PlatformIntegration):
     def extract_rich_text(self, rich_text_array):
         """Extract plain text from Notion rich text array"""
         return ''.join([rt.get('plain_text', '') for rt in rich_text_array])
+    
+
+class SlackIntegration(PlatformIntegration):
+    def __init__(self):
+        super().__init__()
+        self.authorization_base_url = 'https://slack.com/oauth/v2/authorize'
+        self.token_url = 'https://slack.com/api/oauth.v2.access'
+        self.scope = ['files:read', 'channels:read', 'groups:read', 'im:read', 'mpim:read', 'users:read', 'users:read.email']
+    
+    def get_auth_url(self, user_email=None):
+        """Get Slack OAuth authorization URL"""
+        if not SLACK_CLIENT_ID:
+            raise ValueError("SLACK_CLIENT_ID not configured")
+            
+        redirect_uri = get_redirect_uri('auth_slack_callback')
+        print(f"Slack redirect URI: {redirect_uri}")  # Debug log
+        
+        state = str(uuid.uuid4())
+        
+        # Store user_email in session with state
+        session[f'slack_oauth_state_{state}'] = {
+            'state': state,
+            'user_email': user_email
+        }
+        
+        params = {
+            'client_id': SLACK_CLIENT_ID,
+            'redirect_uri': redirect_uri,
+            'scope': ' '.join(self.scope),
+            'state': state,
+            'response_type': 'code'
+        }
+        return f"{self.authorization_base_url}?{urlencode(params)}"
+    
+    def get_access_token(self, authorization_code, state):
+        """Exchange authorization code for access token"""
+        if not SLACK_CLIENT_ID or not SLACK_CLIENT_SECRET:
+            raise ValueError("Slack OAuth credentials not configured")
+            
+        # Verify state and get user_email
+        state_data = session.get(f'slack_oauth_state_{state}')
+        if not state_data or state_data['state'] != state:
+            raise ValueError("State mismatch - possible CSRF attack")
+            
+        data = {
+            'client_id': SLACK_CLIENT_ID,
+            'client_secret': SLACK_CLIENT_SECRET,
+            'code': authorization_code,
+            'redirect_uri': get_redirect_uri('auth_slack_callback')
+        }
+        
+        response = requests.post(self.token_url, data=data)
+        if response.status_code != 200:
+            raise ValueError(f"Failed to get access token: {response.text}")
+        
+        token_data = response.json()
+        if not token_data.get('ok'):
+            raise ValueError(f"Slack OAuth error: {token_data.get('error', 'Unknown error')}")
+        
+        # Clean up session
+        del session[f'slack_oauth_state_{state}']
+        
+        return token_data, state_data['user_email']
+    
+    def download_slack_file(self, file_url, access_token):
+        """Download file from Slack using the private download URL"""
+        headers = {'Authorization': f'Bearer {access_token}'}
+        
+        try:
+            response = requests.get(file_url, headers=headers)
+            if response.status_code == 200:
+                return response.content
+            else:
+                print(f"Failed to download file from {file_url}: {response.status_code}")
+                return None
+        except Exception as e:
+            print(f"Error downloading file from Slack: {e}")
+            return None
+    
+    def sync_files(self, access_token, user_email):
+        """Sync files from Slack"""
+        headers = {'Authorization': f'Bearer {access_token}'}
+        
+        synced_files = []
+        
+        try:
+            # Get files list from Slack
+            files_list_url = 'https://slack.com/api/files.list'
+            params = {
+                'count': 100,
+                'types': 'all'
+            }
+            
+            response = requests.get(files_list_url, headers=headers, params=params)
+            if response.status_code != 200:
+                return {'error': 'Failed to fetch files from Slack'}
+            
+            response_data = response.json()
+            if not response_data.get('ok'):
+                return {'error': f"Slack API error: {response_data.get('error', 'Unknown error')}"}
+            
+            files = response_data.get('files', [])
+            
+            for file_info in files:
+                filename = file_info.get('name', '')
+                
+                # Handle both supported and unsupported file types
+                if self.is_supported_file(filename):
+                    # Download actual file content for supported types
+                    private_url = file_info.get('url_private_download') or file_info.get('url_private')
+                    if private_url:
+                        file_content = self.download_slack_file(private_url, access_token)
+                    else:
+                        continue
+                else:
+                    # Create metadata file for unsupported types
+                    file_info_text = f"Slack File Metadata\n"
+                    file_info_text += f"Original filename: {filename}\n"
+                    file_info_text += f"File type: {file_info.get('filetype', 'unknown')}\n"
+                    file_info_text += f"Size: {file_info.get('size', 0)} bytes\n"
+                    file_info_text += f"Title: {file_info.get('title', 'No title')}\n"
+                    file_info_text += f"URL: {file_info.get('permalink', 'No URL')}\n"
+                    file_info_text += f"Channels: {', '.join(file_info.get('channels', []))}\n"
+                    
+                    file_content = file_info_text.encode('utf-8')
+                    filename = f"{os.path.splitext(filename)[0]}_metadata.txt"
+                
+                if file_content:
+                    # Upload to blob storage
+                    blob_path = self.upload_to_blob_storage(
+                        file_content,
+                        user_email,
+                        filename
+                    )
+                    
+                    if blob_path:
+                        # Save metadata
+                        created_timestamp = file_info.get('created')
+                        original_date = None
+                        if created_timestamp:
+                            original_date = datetime.fromtimestamp(created_timestamp, tz=timezone.utc)
+                        
+                        metadata = self.save_file_metadata(
+                            user_email,
+                            filename,
+                            blob_path,
+                            'slack',
+                            original_date,
+                            file_info.get('size'),
+                            file_info.get('mimetype')
+                        )
+                        
+                        if metadata:
+                            # Add Slack-specific metadata
+                            metadata['slack_file_id'] = file_info.get('id')
+                            metadata['slack_team_id'] = file_info.get('team')
+                            metadata['permalink'] = file_info.get('permalink')
+                            metadata['channels'] = file_info.get('channels', [])
+                            metadata['is_external'] = file_info.get('is_external', False)
+                            metadata['is_public'] = file_info.get('is_public', False)
+                            
+                            synced_files.append(metadata)
+        
+        except Exception as e:
+            print(f"Error syncing Slack files: {e}")
+            return {'error': str(e)}
+        
+        return {'synced_files': synced_files, 'count': len(synced_files)}
+    
+
 
 # Initialize platform integrations
 google_drive = GoogleDriveIntegration()
 onedrive = OneDriveIntegration()
 dropbox_integration = DropboxIntegration()
 notion_integration = NotionIntegration()
+slack_integration = SlackIntegration()
 
 def store_user_token(user_email, platform, token_data):
     """Store user's platform token in their blob storage userInfo.json"""
@@ -1006,6 +1177,53 @@ def auth_notion_callback():
             
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    
+@app.route('/auth/slack')
+def auth_slack():
+    """Initiate Slack OAuth"""
+    try:
+        user_email = request.args.get('user_email')
+        if not user_email:
+            return jsonify({'error': 'user_email parameter is required'}), 400
+        
+        auth_url = slack_integration.get_auth_url(user_email)
+        return redirect(auth_url)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/auth/slack/callback')
+def auth_slack_callback():
+    """Slack OAuth callback"""
+    try:
+        code = request.args.get('code')
+        state = request.args.get('state')
+        error = request.args.get('error')
+        
+        if error:
+            return jsonify({'error': f'Slack OAuth error: {error}'}), 400
+        
+        if not code or not state:
+            return jsonify({'error': 'Missing authorization code or state'}), 400
+        
+        token_data, user_email = slack_integration.get_access_token(code, state)
+        
+        if not user_email:
+            return jsonify({'error': 'No user email found in state'}), 400
+        
+        # Store the token
+        if store_user_token(user_email, 'slack', token_data):
+            return jsonify({
+                'message': 'Slack connected successfully',
+                'platform': 'slack',
+                'user_email': user_email,
+                'team_name': token_data.get('team', {}).get('name', 'Unknown')
+            })
+        else:
+            return jsonify({'error': 'Failed to store access token'}), 500
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # File Sync Routes
 @app.route('/sync/google', methods=['POST'])
@@ -1094,6 +1312,29 @@ def sync_notion_pages():
         
         access_token = token_info.get('access_token')
         result = notion_integration.sync_files(access_token, user_email)
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@app.route('/sync/slack', methods=['POST'])
+def sync_slack_files():
+    """Sync files from Slack"""
+    try:
+        data = request.get_json()
+        user_email = data.get('user_email')
+        
+        if not user_email:
+            return jsonify({'error': 'user_email is required'}), 400
+        
+        # Get stored token
+        token_info = get_user_token(user_email, 'slack')
+        if not token_info:
+            return jsonify({'error': 'No Slack token found. Please authenticate first.'}), 401
+        
+        access_token = token_info.get('access_token')
+        result = slack_integration.sync_files(access_token, user_email)
         
         return jsonify(result)
         
